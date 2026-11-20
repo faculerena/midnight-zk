@@ -476,11 +476,11 @@ impl<F: Field> Assignment<F> for DevAssembly<F> {
         assert!(self.current_region.is_none());
         self.current_region = Some(Region {
             name: name().into(),
-            columns: HashSet::default(),
+            columns: Default::default(),
             rows: None,
             annotations: HashMap::default(),
-            enabled_selectors: HashMap::default(),
-            cells: HashMap::default(),
+            enabled_selectors: Default::default(),
+            cells: Default::default(),
             is_measured: self.in_measured_region,
         });
     }
