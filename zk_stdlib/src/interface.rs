@@ -546,6 +546,67 @@ pub fn setup_vk<R: Relation, PCS: MidnightPCS>(
     }
 }
 
+/// A proving key of a Midnight circuit that can be written out, and that is
+/// all it can do: it has no prover data, and there is no way to get a
+/// [MidnightPK] out of it. It writes the same bytes as the [MidnightPK] that
+/// [setup_pk] gives; to prove, read those back with [MidnightPK::read].
+///
+/// See `midnight_proofs::plonk::WriteOnlyProvingKey`.
+#[derive(Debug)]
+pub struct MidnightWriteOnlyPK<R: Relation, PCS: MidnightPCS> {
+    k: u8,
+    relation: R,
+    pk: plonk::WriteOnlyProvingKey<midnight_curves::Fq, PCS>,
+}
+
+impl<Rel: Relation, PCS: MidnightPCS> MidnightWriteOnlyPK<Rel, PCS> {
+    /// Writes the proving key to a buffer, exactly as [MidnightPK::write]
+    /// does.
+    pub fn write<W: io::Write>(&self, writer: &mut W, format: SerdeFormat) -> io::Result<()> {
+        writer.write_all(&[PCS::ID])?;
+
+        writer.write_all(&[self.k])?;
+
+        Rel::write_relation(&self.relation, writer)?;
+
+        self.pk.write(writer, format)
+    }
+}
+
+/// Generates a verifying key and a write-only proving key for a
+/// `MidnightCircuit<R>` circuit with a single synthesis, for when the keys
+/// are only to be written out.
+///
+/// The verifying key is the one [setup_vk] gives. The proving key writes the
+/// same bytes as the one [setup_pk] gives but cannot be used to prove: see
+/// [MidnightWriteOnlyPK].
+#[allow(clippy::type_complexity)]
+pub fn setup_keys_for_write<R: Relation, PCS: MidnightPCS>(
+    params: &ParamsKZG<Bls12>,
+    relation: &R,
+) -> Result<(MidnightVK<PCS>, MidnightWriteOnlyPK<R, PCS>), Error> {
+    let k = PCS::max_k(params);
+    let circuit = MidnightCircuit::from_relation(relation, Some(k));
+    let (vk, pk) = plonk::keygen_for_write_with_k(params, &circuit, k)?;
+
+    // As in [setup_vk], synthesis has set the number of public inputs.
+    let nb_public_inputs = circuit.nb_public_inputs.borrow().unwrap();
+
+    Ok((
+        MidnightVK {
+            architecture: relation.used_chips(),
+            k: circuit.k as u8,
+            nb_public_inputs,
+            vk,
+        },
+        MidnightWriteOnlyPK {
+            k: circuit.k as u8,
+            relation: relation.clone(),
+            pk,
+        },
+    ))
+}
+
 /// Generates a proving key for a `MidnightCircuit<R>` circuit.
 pub fn setup_pk<R: Relation, PCS: MidnightPCS>(
     relation: &R,

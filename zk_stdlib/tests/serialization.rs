@@ -212,6 +212,36 @@ fn vk_write_raw_then_read_processed() {
     );
 }
 
+/// `setup_keys_for_write` gives the verifying key of `setup_vk` and a proving
+/// key that writes the bytes of the one of `setup_pk`.
+fn keys_for_write_test(architecture: ZkStdLibArch, format: SerdeFormat) {
+    let relation = DummyCircuit { architecture };
+    let srs = srs_for_test(&relation, None);
+    let vk = midnight_zk_stdlib::setup_vk::<_, KZG>(&srs, &relation);
+    let pk = midnight_zk_stdlib::setup_pk(&relation, &vk);
+    let (write_vk, write_pk) =
+        midnight_zk_stdlib::setup_keys_for_write::<_, KZG>(&srs, &relation).unwrap();
+
+    let (mut expected, mut got) = (Vec::new(), Vec::new());
+    vk.write(&mut expected, format).unwrap();
+    write_vk.write(&mut got, format).unwrap();
+    assert_eq!(got, expected);
+
+    let (mut expected, mut got) = (Vec::new(), Vec::new());
+    pk.write(&mut expected, format).unwrap();
+    write_pk.write(&mut got, format).unwrap();
+    assert_eq!(got, expected);
+}
+
+#[test]
+#[serial]
+fn keys_for_write_match_setup() {
+    for arch in ARCHITECTURES {
+        keys_for_write_test(arch, SerdeFormat::Processed);
+        keys_for_write_test(arch, SerdeFormat::RawBytes);
+    }
+}
+
 fn pk_serde_test(architecture: ZkStdLibArch, write_format: SerdeFormat, read_format: SerdeFormat) {
     let relation = DummyCircuit { architecture };
     let srs = srs_for_test(&relation, None);
