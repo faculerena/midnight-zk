@@ -114,6 +114,18 @@ impl Assembly {
         build_vk(params, domain, p, |i, j| self.mapping[i][j])
     }
 
+    pub(crate) fn build_vk_and_permutations<
+        F: WithSmallOrderMulGroup<3>,
+        CS: PolynomialCommitmentScheme<F>,
+    >(
+        self,
+        params: &CS::Parameters,
+        domain: &EvaluationDomain<F>,
+        p: &Argument,
+    ) -> Result<(VerifyingKey<F, CS>, Vec<Polynomial<F, LagrangeCoeff>>), Error> {
+        build_vk_and_permutations(params, domain, p, |i, j| self.mapping[i][j])
+    }
+
     pub(crate) fn build_pk<F: WithSmallOrderMulGroup<3>>(
         self,
         domain: &EvaluationDomain<F>,
@@ -248,6 +260,90 @@ pub(crate) fn build_vk<F: WithSmallOrderMulGroup<3>, CS: PolynomialCommitmentSch
     }
 
     VerifyingKey { commitments }
+}
+
+pub(crate) fn build_vk_and_permutations<
+    F: WithSmallOrderMulGroup<3>,
+    CS: PolynomialCommitmentScheme<F>,
+>(
+    params: &CS::Parameters,
+    domain: &EvaluationDomain<F>,
+    p: &Argument,
+    mapping: impl Fn(usize, usize) -> (usize, usize) + Sync,
+) -> Result<(VerifyingKey<F, CS>, Vec<Polynomial<F, LagrangeCoeff>>), Error> {
+    // Compute [omega^0, omega^1, ..., omega^{params.n - 1}]
+    let mut omega_powers = vec![F::ZERO; domain.n as usize];
+    {
+        let omega = domain.get_omega();
+        parallelize(&mut omega_powers, |o, start| {
+            let mut cur = omega.pow_vartime([start as u64]);
+            for v in o.iter_mut() {
+                *v = cur;
+                cur *= &omega;
+            }
+        })
+    }
+
+    // Compute [omega_powers * \delta^0, omega_powers * \delta^1, ..., omega_powers
+    // * \delta^m]
+    let mut deltaomega = vec![omega_powers; p.columns.len()];
+    {
+        parallelize(&mut deltaomega, |o, start| {
+            let mut cur = F::DELTA.pow_vartime([start as u64]);
+            for omega_powers in o.iter_mut() {
+                for v in omega_powers {
+                    *v *= &cur;
+                }
+                cur *= &F::DELTA;
+            }
+        });
+    }
+
+    // Computes the permutation polynomial based on the permutation
+    // description in the assembly.
+    let mut permutations = vec![domain.empty_lagrange(); p.columns.len()];
+    {
+        parallelize(&mut permutations, |o, start| {
+            for (x, permutation_poly) in o.iter_mut().enumerate() {
+                let i = start + x;
+                for (j, p) in permutation_poly.iter_mut().enumerate() {
+                    let (permuted_i, permuted_j) = mapping(i, j);
+                    *p = deltaomega[permuted_i][permuted_j];
+                }
+            }
+        });
+    }
+
+    crate::utils::tmark("w:   permutation polys");
+    // Pre-compute commitments for the URS.
+    //
+    // A cell that no copy constraint moves keeps the value of the identity
+    // permutation, delta^i * omega^j, and the identity permutation of column
+    // i is the polynomial delta^i * X. So the commitment is delta^i * [X]
+    // plus the commitment to the difference with the identity, which is zero
+    // outside the copy constraints: the MSM only runs over the cells that
+    // copy constraints move.
+    let mut commitments = Vec::with_capacity(p.columns.len());
+    if !p.columns.is_empty() {
+        // deltaomega[0] is the powers of omega: X in Lagrange form.
+        let x_commitment = CS::commit_x(params, &domain.lagrange_from_vec(deltaomega[0].clone()))?;
+        crate::utils::tmark("w:   commitment to X");
+        for (i, permutation) in permutations.iter().enumerate() {
+            let mut diff = domain.empty_lagrange();
+            diff.values.par_iter_mut().enumerate().for_each(|(j, d)| {
+                if mapping(i, j) != (i, j) {
+                    *d = permutation.values[j] - deltaomega[i][j];
+                }
+            });
+            commitments.push(
+                CS::commit_lagrange(params, &diff)
+                    + x_commitment.clone() * F::DELTA.pow_vartime([i as u64]),
+            );
+        }
+        crate::utils::tmark(&format!("w:   {} permutation commitments", p.columns.len()));
+    }
+
+    Ok((VerifyingKey { commitments }, permutations))
 }
 
 #[allow(clippy::type_complexity)]

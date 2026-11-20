@@ -88,7 +88,26 @@ where
 
         assert!(params.g_lagrange.len() >= size);
 
+        if let Some(res) = msm::msm_lagrange_cached::<E>(params, &poly.values) {
+            return res;
+        }
         msm_specific::<E::G1Affine>(&poly.values, &params.g_lagrange[0..size])
+    }
+
+    fn commit_x(
+        params: &Self::Parameters,
+        x_lagrange: &Polynomial<E::Fr, LagrangeCoeff>,
+    ) -> Result<E::G1, crate::plonk::Error> {
+        let n = x_lagrange.values.len();
+        // `[X]` is `[tau]_1`, the second element of the monomial basis, when
+        // the parameters are exactly of the domain's size. That element is
+        // only used after it has been checked against the Lagrange basis and
+        // the G2 elements (see `ParamsKZG::checked_tau_g1`). For parameters
+        // of any other shape, do what `commit_lagrange` does.
+        if n < 2 || params.g.len() != n || params.g_lagrange.len() != n {
+            return Ok(Self::commit_lagrange(params, x_lagrange));
+        }
+        params.checked_tau_g1().ok_or(crate::plonk::Error::InconsistentSrs)
     }
 
     fn multi_open<T: Transcript>(

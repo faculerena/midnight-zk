@@ -21,7 +21,7 @@ use crate::{
         commitment::{Params, PolynomialCommitmentScheme},
         EvaluationDomain, ExtendedLagrangeCoeff,
     },
-    utils::{arithmetic::parallelize, rational::Rational},
+    utils::{arithmetic::parallelize, rational::Rational, tmark},
 };
 
 pub(crate) fn create_domain<F, ConcreteCircuit>(
@@ -254,6 +254,7 @@ where
         return Err(Error::not_enough_rows_available(domain.k()));
     }
 
+    tmark("vk: start (domain+configure done)");
     let mut assembly: Assembly<F> = Assembly {
         k: domain.k(),
         fixed: vec![domain.empty_lagrange_rational(); cs.num_fixed_columns],
@@ -271,6 +272,7 @@ where
         cs.constants.clone(),
     )?;
 
+    tmark("vk: synthesize");
     let mut fixed = batch_invert_rational(assembly.fixed);
     // After this, the ConstraintSystem should not have any selectors: `verify` does
     // not need them, and `keygen_pk` regenerates `cs` from scratch anyways.
@@ -278,9 +280,12 @@ where
     let (cs, selector_polys) = cs.directly_convert_selectors_to_fixed(selectors);
     fixed.extend(selector_polys.into_iter().map(|poly| domain.lagrange_from_vec(poly)));
 
+    tmark("vk: batch_invert + selectors");
     let permutation_vk = assembly.permutation.build_vk(params, &domain, &cs.permutation);
 
-    let fixed_commitments = fixed.iter().map(|poly| CS::commit_lagrange(params, poly)).collect();
+    tmark("vk: permutation build_vk (polys + commitments)");
+    let fixed_commitments: Vec<_> = fixed.iter().map(|poly| CS::commit_lagrange(params, poly)).collect();
+    tmark(&format!("vk: {} fixed commitments", fixed_commitments.len()));
 
     Ok(VerifyingKey::from_parts(
         domain,
@@ -289,6 +294,126 @@ where
         cs,
     ))
 }
+
+/// The part of a [`ProvingKey`] that [`ProvingKey::write`] serialises, and
+/// nothing else: it can be written out, and that is all it can do.
+///
+/// It holds the verifying key, the fixed columns and the permutation
+/// polynomials in Lagrange form, which is all that `ProvingKey::write` emits
+/// and all that `ProvingKey::read` consumes. The data a prover derives from
+/// those (coefficient and extended forms, `l0`, `l_last`, `l_active_row` and
+/// the evaluator) is not computed, so this is deliberately a type of its own
+/// with no way to get a `ProvingKey` out of it: to prove, read the written
+/// key back with [`ProvingKey::read`], which gives a complete proving key.
+#[derive(Debug)]
+pub struct WriteOnlyProvingKey<F: ff::PrimeField, CS: PolynomialCommitmentScheme<F>> {
+    /// A `ProvingKey` whose derived fields are empty. Never handed out.
+    inner: ProvingKey<F, CS>,
+}
+
+impl<F, CS> WriteOnlyProvingKey<F, CS>
+where
+    F: WithSmallOrderMulGroup<3> + FromUniformBytes<64> + midnight_curves::serde::SerdeObject,
+    CS: PolynomialCommitmentScheme<F>,
+{
+    /// Writes the proving key to a buffer: the same bytes as
+    /// [`ProvingKey::write`] gives for the proving key of [`keygen_pk`].
+    pub fn write<W: std::io::Write>(
+        &self,
+        writer: &mut W,
+        format: crate::utils::SerdeFormat,
+    ) -> std::io::Result<()> {
+        self.inner.write(writer, format)
+    }
+}
+
+/// Generates a `VerifyingKey` and a [`WriteOnlyProvingKey`] with a single
+/// synthesis of the circuit, for when the keys are only to be written out.
+pub fn keygen_for_write_with_k<F, CS, ConcreteCircuit>(
+    params: &CS::Parameters,
+    circuit: &ConcreteCircuit,
+    k: u32,
+) -> Result<(VerifyingKey<F, CS>, WriteOnlyProvingKey<F, CS>), Error>
+where
+    F: WithSmallOrderMulGroup<3> + FromUniformBytes<64> + Ord,
+    CS: PolynomialCommitmentScheme<F>,
+    ConcreteCircuit: Circuit<F>,
+{
+    if params.max_k() < k {
+        return Err(Error::NotEnoughRowsAvailable {
+            current_k: params.max_k(),
+        });
+    }
+
+    let (domain, cs, config) = create_domain::<F, ConcreteCircuit>(
+        k,
+        #[cfg(feature = "circuit-params")]
+        circuit.params(),
+    );
+
+    if (domain.n as usize) < cs.minimum_rows() {
+        return Err(Error::not_enough_rows_available(domain.k()));
+    }
+
+    tmark("w: start (domain+configure done)");
+    let mut assembly: Assembly<F> = Assembly {
+        k: domain.k(),
+        fixed: vec![domain.empty_lagrange_rational(); cs.num_fixed_columns],
+        permutation: permutation::keygen::Assembly::new(domain.n as usize, &cs.permutation),
+        selectors: vec![vec![false; domain.n as usize]; cs.num_selectors],
+        usable_rows: 0..domain.n as usize - (cs.blinding_factors() + 1),
+        _marker: std::marker::PhantomData,
+    };
+
+    // Synthesize the circuit to obtain URS
+    ConcreteCircuit::FloorPlanner::synthesize(
+        &mut assembly,
+        circuit,
+        config,
+        cs.constants.clone(),
+    )?;
+
+    tmark("w: synthesize");
+    let mut fixed = batch_invert_rational(assembly.fixed);
+    // After this, the ConstraintSystem should not have any selectors: `verify` does
+    // not need them, and `keygen_pk` regenerates `cs` from scratch anyways.
+    let selectors = std::mem::take(&mut assembly.selectors);
+    let (cs, selector_polys) = cs.directly_convert_selectors_to_fixed(selectors);
+    fixed.extend(selector_polys.into_iter().map(|poly| domain.lagrange_from_vec(poly)));
+
+    tmark("w: batch_invert + selectors");
+    let (permutation_vk, permutations) =
+        assembly.permutation.build_vk_and_permutations(params, &domain, &cs.permutation)?;
+    tmark("w: permutation polys + commitments");
+
+    let fixed_commitments: Vec<_> =
+        fixed.iter().map(|poly| CS::commit_lagrange(params, poly)).collect();
+    tmark(&format!("w: {} fixed commitments", fixed_commitments.len()));
+
+    let vk = VerifyingKey::from_parts(domain, fixed_commitments, permutation_vk, cs);
+    let empty = || Polynomial {
+        values: Vec::new(),
+        _marker: std::marker::PhantomData,
+    };
+    let pk = ProvingKey {
+        vk: vk.clone(),
+        l0: empty(),
+        l_last: empty(),
+        l_active_row: empty(),
+        fixed_values: fixed,
+        fixed_polys: Vec::new(),
+        fixed_cosets: Vec::new(),
+        permutation: permutation::ProvingKey {
+            permutations,
+            polys: Vec::new(),
+            cosets: Vec::new(),
+        },
+        ev: Evaluator::default(),
+    };
+    tmark("w: assemble");
+    Ok((vk, WriteOnlyProvingKey { inner: pk }))
+}
+
 
 /// Generate a `ProvingKey` from a `VerifyingKey` and an instance of `Circuit`.
 pub fn keygen_pk<F, CS, ConcreteCircuit>(
@@ -309,6 +434,7 @@ where
     let cs = cs;
 
     let n = vk.domain.n as usize;
+    tmark("pk: start (configure done)");
     let mut assembly: Assembly<F> = Assembly {
         k: vk.domain.k(),
         fixed: vec![vk.domain.empty_lagrange_rational(); cs.num_fixed_columns],
@@ -326,23 +452,30 @@ where
         cs.constants.clone(),
     )?;
 
+    tmark("pk: synthesize");
     let mut fixed = batch_invert_rational(assembly.fixed);
     let (cs, selector_polys) = cs.directly_convert_selectors_to_fixed(assembly.selectors);
     fixed.extend(selector_polys.into_iter().map(|poly| vk.domain.lagrange_from_vec(poly)));
 
+    tmark("pk: batch_invert + selectors");
     let fixed_polys: Vec<_> =
         fixed.par_iter().map(|poly| vk.domain.lagrange_to_coeff(poly.clone())).collect();
 
+    tmark("pk: fixed lagrange_to_coeff");
     let fixed_cosets = fixed_polys
         .par_iter()
         .map(|poly| vk.domain.coeff_to_extended(poly.clone()))
         .collect();
 
+    tmark("pk: fixed coeff_to_extended");
     let permutation_pk = assembly.permutation.build_pk::<F>(&vk.domain, &cs.permutation);
 
+    tmark("pk: permutation build_pk (polys + coeff + cosets)");
     let [l0, l_last, l_active_row] = compute_lagrange_polys(&vk, &cs);
+    tmark("pk: l0/l_last/l_active");
     // Compute the optimized evaluation data structure
     let ev = Evaluator::new(&vk.cs);
+    tmark("pk: evaluator");
     Ok(ProvingKey {
         vk,
         l0,

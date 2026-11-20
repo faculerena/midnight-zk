@@ -78,11 +78,12 @@ fn from_u64_le_digits<F: CircuitField>(digits: &[u64]) -> F {
         return F::ZERO;
     }
 
+    // 2^64: one multiplication per digit instead of 64 doublings.
+    // (`from_u128` would itself double 64 times.)
+    let shift = F::from(1u64 << 32).square();
     let mut acc = F::from(*digits.last().unwrap());
     for digit in digits.iter().rev().skip(1) {
-        for _ in 0..64 {
-            acc = acc.double();
-        }
+        acc *= shift;
         acc += F::from(*digit)
     }
     acc

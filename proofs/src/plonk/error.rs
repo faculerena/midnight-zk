@@ -42,6 +42,10 @@ pub enum Error {
     /// Completeness failure due to bad luck in random sampling.
     /// This error is expected to be almost impossible to trigger.
     CompletenessFailure,
+    /// The SRS does not agree with itself: its monomial basis is not the one
+    /// its Lagrange basis and its G2 elements stand for. A params file that
+    /// fails this check is corrupt.
+    InconsistentSrs,
 }
 
 impl From<io::Error> for Error {
@@ -84,6 +88,7 @@ impl fmt::Display for Error {
             ),
             Error::TableError(error) => write!(f, "{error}"),
             Error::SrsError(srs_k, circuit_k) => write!(f, "The SRS (with size {srs_k}) does not match for the given circuit (of size {circuit_k})"),
+            Error::InconsistentSrs => write!(f, "The SRS is inconsistent (corrupt parameters?): its monomial basis does not match its Lagrange basis and G2 elements"),
             Self::CompletenessFailure => write!(f, "Completeness failure due to bad luck in random sampling. This error is expected to be almost impossible to trigger."),
         }
     }

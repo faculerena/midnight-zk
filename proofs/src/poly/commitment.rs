@@ -50,6 +50,22 @@ pub trait PolynomialCommitmentScheme<F: PrimeField>: Clone + Debug {
         poly: &Polynomial<F, LagrangeCoeff>,
     ) -> Self::Commitment;
 
+    /// The commitment to the polynomial `X`, given as its evaluations over
+    /// the domain (the powers of omega): the same group element as
+    /// [`Self::commit_lagrange`] of `x_lagrange`, which is what this does
+    /// unless the scheme knows a cheaper way to the same element.
+    ///
+    /// An implementation that takes the element from somewhere else than the
+    /// Lagrange basis MUST check that source against the Lagrange basis and
+    /// fail if they disagree, so that the result never depends on parameters
+    /// that `commit_lagrange` does not read.
+    fn commit_x(
+        params: &Self::Parameters,
+        x_lagrange: &Polynomial<F, LagrangeCoeff>,
+    ) -> Result<Self::Commitment, crate::plonk::Error> {
+        Ok(Self::commit_lagrange(params, x_lagrange))
+    }
+
     /// Create a multi-opening proof at a set of [ProverQuery]'s.
     fn multi_open<T: Transcript>(
         params: &Self::Parameters,
