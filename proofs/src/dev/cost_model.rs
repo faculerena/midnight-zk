@@ -1,14 +1,7 @@
 //! The cost estimator takes high-level parameters for a circuit design, and
 //! estimates the verification cost, as well as resulting proof size.
 
-use std::{
-    cell::RefCell,
-    cmp::max,
-    collections::{HashMap, HashSet},
-    iter,
-    num::ParseIntError,
-    str::FromStr,
-};
+use std::{cell::RefCell, cmp::max, collections::HashMap, iter, num::ParseIntError, str::FromStr};
 
 use ff::{Field, FromUniformBytes};
 use serde::Deserialize;
@@ -511,11 +504,11 @@ impl<F: Field> Assignment<F> for DevAssembly<F> {
         assert!(self.current_region.is_none());
         self.current_region = Some(Region {
             name: name().into(),
-            columns: HashSet::default(),
+            columns: Default::default(),
             rows: None,
             annotations: HashMap::default(),
-            enabled_selectors: HashMap::default(),
-            cells: HashMap::default(),
+            enabled_selectors: Default::default(),
+            cells: Default::default(),
             is_measured: self.in_measured_region,
         });
     }

@@ -1,9 +1,6 @@
 //! Implementations of common table layouters.
 
-use std::{
-    collections::HashMap,
-    fmt::{self, Debug},
-};
+use std::fmt::{self, Debug};
 
 use ff::Field;
 
@@ -46,7 +43,7 @@ pub struct SimpleTableLayouter<'r, 'a, F: Field, CS: Assignment<F> + 'a> {
     used_columns: &'r [TableColumn],
     /// maps from a fixed column to a pair (default value, vector saying which
     /// rows are assigned)
-    pub default_and_assigned: HashMap<TableColumn, (DefaultTableValue<F>, Vec<bool>)>,
+    pub default_and_assigned: crate::utils::FxMap<TableColumn, (DefaultTableValue<F>, Vec<bool>)>,
 }
 
 impl<'a, F: Field, CS: Assignment<F> + 'a> fmt::Debug for SimpleTableLayouter<'_, 'a, F, CS> {
@@ -64,7 +61,7 @@ impl<'r, 'a, F: Field, CS: Assignment<F> + 'a> SimpleTableLayouter<'r, 'a, F, CS
         SimpleTableLayouter {
             cs,
             used_columns,
-            default_and_assigned: HashMap::default(),
+            default_and_assigned: Default::default(),
         }
     }
 }
@@ -119,7 +116,7 @@ impl<'a, F: Field, CS: Assignment<F> + 'a> TableLayouter<F> for SimpleTableLayou
 }
 
 pub(crate) fn compute_table_lengths<F: Debug>(
-    default_and_assigned: &HashMap<TableColumn, (DefaultTableValue<F>, Vec<bool>)>,
+    default_and_assigned: &crate::utils::FxMap<TableColumn, (DefaultTableValue<F>, Vec<bool>)>,
 ) -> Result<usize, Error> {
     let column_lengths: Result<Vec<_>, Error> = default_and_assigned
         .iter()

@@ -106,7 +106,8 @@ impl FailureLocation {
                     // regions are rectangles, and failures occur due to assignments entirely
                     // within single regions, "any" will be equivalent to "all". If these
                     // assumptions change, we'll start getting bug reports from users :)
-                    (start..=end).contains(&failure_row) && !failure_columns.is_disjoint(&r.columns)
+                    (start..=end).contains(&failure_row)
+                        && failure_columns.iter().any(|c| r.columns.contains(c))
                 } else {
                     // Zero-area region
                     false

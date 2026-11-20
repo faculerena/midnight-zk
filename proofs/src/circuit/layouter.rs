@@ -1,6 +1,6 @@
 //! Implementations of common circuit layouters.
 
-use std::{cmp, collections::HashSet, fmt};
+use std::{cmp, fmt};
 
 use ff::Field;
 
@@ -137,7 +137,7 @@ pub trait RegionLayouter<F: Field>: fmt::Debug + SyncDeps {
 #[derive(Clone, Debug)]
 pub struct RegionShape {
     pub(super) region_index: RegionIndex,
-    pub(super) columns: HashSet<RegionColumn>,
+    pub(super) columns: crate::utils::FxSet<RegionColumn>,
     pub(super) row_count: usize,
 }
 
@@ -185,7 +185,7 @@ impl RegionShape {
     pub fn new(region_index: RegionIndex) -> Self {
         RegionShape {
             region_index,
-            columns: HashSet::default(),
+            columns: Default::default(),
             row_count: 0,
         }
     }
@@ -196,7 +196,7 @@ impl RegionShape {
     }
 
     /// Get a reference to the set of `columns` used in a `RegionShape`.
-    pub fn columns(&self) -> &HashSet<RegionColumn> {
+    pub fn columns(&self) -> &crate::utils::FxSet<RegionColumn> {
         &self.columns
     }
 

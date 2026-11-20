@@ -1,4 +1,4 @@
-use std::{cmp, collections::HashMap, fmt, marker::PhantomData};
+use std::{cmp, fmt, marker::PhantomData};
 
 use ff::Field;
 
@@ -75,7 +75,7 @@ pub struct SingleChipLayouter<'a, F: Field, CS: Assignment<F> + 'a> {
     /// Stores the starting row for each region.
     regions: Vec<RegionStart>,
     /// Stores the first empty row for each column.
-    columns: HashMap<RegionColumn, usize>,
+    columns: crate::utils::FxMap<RegionColumn, usize>,
     /// Stores the table fixed columns.
     table_columns: Vec<TableColumn>,
     /// When `Some`, the shape pass is skipped and these pre-computed region
@@ -104,7 +104,7 @@ impl<'a, F: Field, CS: Assignment<F>> SingleChipLayouter<'a, F, CS> {
             cs,
             constants,
             regions: vec![],
-            columns: HashMap::default(),
+            columns: Default::default(),
             table_columns: vec![],
             cached_region_starts: None,
             region_sink: None,
@@ -123,7 +123,7 @@ impl<'a, F: Field, CS: Assignment<F>> SingleChipLayouter<'a, F, CS> {
             cs,
             constants,
             regions: vec![],
-            columns: HashMap::default(),
+            columns: Default::default(),
             table_columns: vec![],
             cached_region_starts: Some(cached_regions),
             region_sink: None,
@@ -144,7 +144,7 @@ impl<'a, F: Field, CS: Assignment<F>> SingleChipLayouter<'a, F, CS> {
             cs,
             constants,
             regions: vec![],
-            columns: HashMap::default(),
+            columns: Default::default(),
             table_columns: vec![],
             cached_region_starts: None,
             region_sink: Some(sink),
