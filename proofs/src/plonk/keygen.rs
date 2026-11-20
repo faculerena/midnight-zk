@@ -278,7 +278,7 @@ where
     let (cs, selector_polys) = cs.directly_convert_selectors_to_fixed(selectors);
     fixed.extend(selector_polys.into_iter().map(|poly| domain.lagrange_from_vec(poly)));
 
-    let permutation_vk = assembly.permutation.build_vk(params, &domain, &cs.permutation);
+    let permutation_vk = assembly.permutation.build_vk(params, &domain, &cs.permutation)?;
 
     let fixed_commitments = fixed.iter().map(|poly| CS::commit_lagrange(params, poly)).collect();
 

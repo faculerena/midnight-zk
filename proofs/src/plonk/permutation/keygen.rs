@@ -110,8 +110,8 @@ impl Assembly {
         params: &CS::Parameters,
         domain: &EvaluationDomain<F>,
         p: &Argument,
-    ) -> VerifyingKey<F, CS> {
-        build_vk(params, domain, p, |i, j| self.mapping[i][j])
+    ) -> Result<VerifyingKey<F, CS>, Error> {
+        Ok(build_vk(params, domain, p, |i, j| self.mapping[i][j])?.0)
     }
 
     pub(crate) fn build_pk<F: WithSmallOrderMulGroup<3>>(
@@ -135,11 +135,14 @@ impl Assembly {
     }
 }
 
-pub(crate) fn build_pk<F: WithSmallOrderMulGroup<3>>(
+/// The permutation polynomials of `p` in Lagrange form, and the identity
+/// permutation they are built from: `deltaomega[i][j] = delta^i * omega^j`.
+#[allow(clippy::type_complexity)]
+fn permutation_polys<F: WithSmallOrderMulGroup<3>>(
     domain: &EvaluationDomain<F>,
     p: &Argument,
-    mapping: impl Fn(usize, usize) -> (usize, usize) + Sync,
-) -> ProvingKey<F> {
+    mapping: &(impl Fn(usize, usize) -> (usize, usize) + Sync),
+) -> (Vec<Vec<F>>, Vec<Polynomial<F, LagrangeCoeff>>) {
     // Compute [omega^0, omega^1, ..., omega^{params.n - 1}]
     let mut omega_powers = vec![F::ZERO; domain.n as usize];
     {
@@ -168,7 +171,7 @@ pub(crate) fn build_pk<F: WithSmallOrderMulGroup<3>>(
         });
     }
 
-    // Compute permutation polynomials, convert to coset form.
+    // Compute the permutation polynomials from the mapping.
     let mut permutations = vec![domain.empty_lagrange(); p.columns.len()];
     {
         parallelize(&mut permutations, |o, start| {
@@ -182,6 +185,15 @@ pub(crate) fn build_pk<F: WithSmallOrderMulGroup<3>>(
         });
     }
 
+    (deltaomega, permutations)
+}
+
+pub(crate) fn build_pk<F: WithSmallOrderMulGroup<3>>(
+    domain: &EvaluationDomain<F>,
+    p: &Argument,
+    mapping: impl Fn(usize, usize) -> (usize, usize) + Sync,
+) -> ProvingKey<F> {
+    let (_, permutations) = permutation_polys(domain, p, &mapping);
     let (polys, cosets) = compute_polys_and_cosets::<F>(domain, p, &permutations);
 
     ProvingKey {
@@ -191,63 +203,41 @@ pub(crate) fn build_pk<F: WithSmallOrderMulGroup<3>>(
     }
 }
 
+/// The verifying key of the permutation argument, and the permutation
+/// polynomials in Lagrange form it commits to.
+#[allow(clippy::type_complexity)]
 pub(crate) fn build_vk<F: WithSmallOrderMulGroup<3>, CS: PolynomialCommitmentScheme<F>>(
     params: &CS::Parameters,
     domain: &EvaluationDomain<F>,
     p: &Argument,
     mapping: impl Fn(usize, usize) -> (usize, usize) + Sync,
-) -> VerifyingKey<F, CS> {
-    // Compute [omega^0, omega^1, ..., omega^{params.n - 1}]
-    let mut omega_powers = vec![F::ZERO; domain.n as usize];
-    {
-        let omega = domain.get_omega();
-        parallelize(&mut omega_powers, |o, start| {
-            let mut cur = omega.pow_vartime([start as u64]);
-            for v in o.iter_mut() {
-                *v = cur;
-                cur *= &omega;
-            }
-        })
-    }
+) -> Result<(VerifyingKey<F, CS>, Vec<Polynomial<F, LagrangeCoeff>>), Error> {
+    let (deltaomega, permutations) = permutation_polys(domain, p, &mapping);
 
-    // Compute [omega_powers * \delta^0, omega_powers * \delta^1, ..., omega_powers
-    // * \delta^m]
-    let mut deltaomega = vec![omega_powers; p.columns.len()];
-    {
-        parallelize(&mut deltaomega, |o, start| {
-            let mut cur = F::DELTA.pow_vartime([start as u64]);
-            for omega_powers in o.iter_mut() {
-                for v in omega_powers {
-                    *v *= &cur;
-                }
-                cur *= &F::DELTA;
-            }
-        });
-    }
-
-    // Computes the permutation polynomial based on the permutation
-    // description in the assembly.
-    let mut permutations = vec![domain.empty_lagrange(); p.columns.len()];
-    {
-        parallelize(&mut permutations, |o, start| {
-            for (x, permutation_poly) in o.iter_mut().enumerate() {
-                let i = start + x;
-                for (j, p) in permutation_poly.iter_mut().enumerate() {
-                    let (permuted_i, permuted_j) = mapping(i, j);
-                    *p = deltaomega[permuted_i][permuted_j];
-                }
-            }
-        });
-    }
-
-    // Pre-compute commitments for the URS.
+    // A cell that no copy constraint moves keeps the value of the identity
+    // permutation, delta^i * omega^j, and the identity permutation of column
+    // i is the polynomial delta^i * X. So the commitment to the permutation
+    // polynomial of column i is delta^i * [X] plus the commitment to its
+    // difference with the identity, which is zero outside the cells that copy
+    // constraints move: that MSM only runs over those cells.
     let mut commitments = Vec::with_capacity(p.columns.len());
-    for permutation in &permutations {
-        // Compute commitment to permutation polynomial
-        commitments.push(CS::commit_lagrange(params, permutation));
+    if !p.columns.is_empty() {
+        // deltaomega[0] is the powers of omega: X in Lagrange form.
+        let x_commitment = CS::commit_x(params, &domain.lagrange_from_vec(deltaomega[0].clone()))?;
+        let mut delta_i = F::ONE;
+        for (i, permutation) in permutations.iter().enumerate() {
+            let mut diff = domain.empty_lagrange();
+            diff.par_iter_mut().enumerate().for_each(|(j, d)| {
+                if mapping(i, j) != (i, j) {
+                    *d = permutation[j] - deltaomega[i][j];
+                }
+            });
+            commitments.push(CS::commit_lagrange(params, &diff) + x_commitment.clone() * delta_i);
+            delta_i *= F::DELTA;
+        }
     }
 
-    VerifyingKey { commitments }
+    Ok((VerifyingKey { commitments }, permutations))
 }
 
 #[allow(clippy::type_complexity)]
@@ -280,4 +270,60 @@ pub(crate) fn compute_polys_and_cosets<F: WithSmallOrderMulGroup<3>>(
         });
     }
     (polys, cosets)
+}
+
+#[cfg(test)]
+mod tests {
+    use midnight_curves::{Bls12, Fq};
+    use rand_core::OsRng;
+
+    use super::*;
+    use crate::poly::kzg::{params::ParamsKZG, KZGCommitmentScheme};
+
+    /// The commitments of `build_vk` are the Lagrange commitments to the
+    /// permutation polynomials, and those are the ones of `build_pk`, with
+    /// and without copy constraints, and for parameters larger than the
+    /// domain.
+    #[test]
+    fn test_build_vk_commits_to_the_permutation_polys() {
+        const K: u32 = 6;
+        let n = 1 << K;
+        let domain = EvaluationDomain::<Fq>::new(1, K);
+        let p = Argument {
+            columns: (0..4).map(|i| Column::new(i, Any::Fixed)).collect(),
+        };
+        let copies = [
+            (0, 1, 1, 2),
+            (1, 2, 3, 5),
+            (2, 0, 2, 7),
+            (0, 10, 3, 10),
+            (3, 63, 0, 0),
+        ];
+
+        for params_k in [K, K + 1] {
+            let params: ParamsKZG<Bls12> = ParamsKZG::unsafe_setup(params_k, OsRng);
+            for nb_copies in [0, 1, copies.len()] {
+                let mut assembly = Assembly::new(n, &p);
+                for &(l, l_row, r, r_row) in &copies[..nb_copies] {
+                    assembly.copy(p.columns[l], l_row, p.columns[r], r_row).unwrap();
+                }
+                let mapping = |i: usize, j: usize| assembly.mapping[i][j];
+
+                let (vk, permutations) =
+                    build_vk::<_, KZGCommitmentScheme<Bls12>>(&params, &domain, &p, mapping)
+                        .unwrap();
+                let expected: Vec<_> = permutations
+                    .iter()
+                    .map(|poly| KZGCommitmentScheme::commit_lagrange(&params, poly))
+                    .collect();
+                assert_eq!(vk.commitments, expected);
+
+                let pk = build_pk(&domain, &p, mapping);
+                assert_eq!(pk.permutations.len(), permutations.len());
+                for (a, b) in pk.permutations.iter().zip(&permutations) {
+                    assert_eq!(a.values, b.values);
+                }
+            }
+        }
+    }
 }
