@@ -193,6 +193,68 @@ pub fn msm_specific<C: CurveAffine>(coeffs: &[C::Scalar], bases: &[C::Curve]) ->
     }
 }
 
+#[allow(unsafe_code)]
+/// The MSM of `coeffs` with the first `coeffs.len()` elements of the Lagrange
+/// basis of `params`, for BLS12-381: the same group element as
+/// [msm_specific] gives for them, computed with the basis converted to affine
+/// form once per `params` instead of once per MSM, and with only as many bits
+/// per scalar as the longest scalar has. `None` for other curves.
+pub(crate) fn msm_lagrange_cached<E: Engine>(
+    params: &super::params::ParamsKZG<E>,
+    coeffs: &[E::Fr],
+) -> Option<E::G1> {
+    use blst::{blst_p1, blst_p1_affine, p1_affines, MultiPoint};
+    use rayon::iter::IntoParallelRefIterator;
+
+    if TypeId::of::<E::G1>() != TypeId::of::<G1Projective>()
+        || TypeId::of::<E::Fr>() != TypeId::of::<Fq>()
+    {
+        return None;
+    }
+    assert!(coeffs.len() <= params.g_lagrange.len());
+    // Safe: we just checked the types.
+    let coeffs = unsafe { &*(coeffs as *const [E::Fr] as *const [Fq]) };
+    let affine = params.g_lagrange_affine.get_or_init(|| {
+        let bases = params.g_lagrange.as_slice();
+        // Safe: E::G1 is G1Projective, a transparent wrapper around blst_p1.
+        let bases =
+            unsafe { std::slice::from_raw_parts(bases.as_ptr() as *const blst_p1, bases.len()) };
+        p1_affines::from(bases).as_slice().into()
+    });
+
+    let bytes: Vec<[u8; 32]> = coeffs.par_iter().map(|s| s.to_bytes_le()).collect();
+    // The MSM only has to cover the bits of the longest scalar, which is far
+    // fewer than 255 for selectors, tables and constants.
+    let bit_len = |b: &[u8; 32]| {
+        b.iter()
+            .rposition(|x| *x != 0)
+            .map_or(0, |i| i * 8 + 8 - b[i].leading_zeros() as usize)
+    };
+    let nbits = bytes.par_iter().map(bit_len).max().unwrap_or(0);
+    if nbits == 0 {
+        return Some(E::G1::identity());
+    }
+    let nbytes = nbits.div_ceil(8);
+
+    // As in [msm_specific], only the non-zero coefficients take part.
+    let is_nonzero = |b: &[u8; 32]| *b != [0u8; 32];
+    let n = bytes.par_iter().filter(|b| is_nonzero(b)).count();
+    let mut scalars = Vec::with_capacity(n * nbytes);
+    let res: blst_p1 = if n == coeffs.len() {
+        bytes.iter().for_each(|b| scalars.extend_from_slice(&b[..nbytes]));
+        affine[..coeffs.len()].mult(&scalars, nbits)
+    } else {
+        let mut points: Vec<blst_p1_affine> = Vec::with_capacity(n);
+        for (b, p) in bytes.iter().zip(affine.iter()).filter(|(b, _)| is_nonzero(b)) {
+            points.push(*p);
+            scalars.extend_from_slice(&b[..nbytes]);
+        }
+        points.as_slice().mult(&scalars, nbits)
+    };
+    // Safe: E::G1 is G1Projective, a transparent wrapper around blst_p1.
+    Some(unsafe { std::mem::transmute_copy(&res) })
+}
+
 /// Two channel MSM accumulator
 #[derive(Debug, Clone)]
 pub struct DualMSM<E: Engine> {

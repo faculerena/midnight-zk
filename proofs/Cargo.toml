@@ -33,6 +33,7 @@ ff = { workspace = true }
 group = { workspace = true }
 midnight-curves = "0.3.1"
 rustc-hash = "2.1"
+blst = "0.3.15"
 rand_core = { workspace = true, features = ["getrandom"] }
 tracing = { workspace = true }
 blake2b_simd = { workspace = true }

@@ -88,6 +88,9 @@ where
 
         assert!(params.g_lagrange.len() >= size);
 
+        if let Some(res) = msm::msm_lagrange_cached::<E>(params, &poly.values) {
+            return res;
+        }
         msm_specific::<E::G1Affine>(&poly.values, &params.g_lagrange[0..size])
     }
 

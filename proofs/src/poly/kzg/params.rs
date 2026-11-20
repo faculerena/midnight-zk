@@ -21,6 +21,10 @@ pub struct ParamsKZG<E: Engine> {
     pub(crate) g_lagrange: Vec<E::G1>,
     pub(crate) g2: E::G2,
     pub(crate) s_g2: E::G2,
+    /// `g_lagrange` in blst's affine form, for BLS12-381 only: made by the
+    /// first Lagrange commitment and reused by the following ones. See
+    /// [`super::msm::msm_lagrange_cached`].
+    pub(crate) g_lagrange_affine: std::sync::OnceLock<std::sync::Arc<[blst::blst_p1_affine]>>,
 }
 
 impl<E: Engine> Params for ParamsKZG<E> {
@@ -46,6 +50,7 @@ impl<E: Engine + Debug> ParamsKZG<E> {
         assert!(n < self.g_lagrange.len());
         self.g.truncate(n);
         self.g_lagrange = g_to_lagrange(&self.g, new_k);
+        self.g_lagrange_affine = Default::default();
     }
 
     /// Initializes parameters for the curve, draws toxic secret from given rng.
@@ -94,6 +99,7 @@ impl<E: Engine + Debug> ParamsKZG<E> {
             g_lagrange,
             g2,
             s_g2,
+            g_lagrange_affine: Default::default(),
         }
     }
 
@@ -114,6 +120,7 @@ impl<E: Engine + Debug> ParamsKZG<E> {
             g,
             g2,
             s_g2,
+            g_lagrange_affine: Default::default(),
         }
     }
 
@@ -223,6 +230,7 @@ impl<E: Engine + Debug> ParamsKZG<E> {
             g_lagrange,
             g2,
             s_g2,
+            g_lagrange_affine: Default::default(),
         })
     }
 }
@@ -292,6 +300,42 @@ mod test {
         },
         utils::SerdeFormat,
     };
+
+    /// The cached Lagrange MSM gives the group element `msm_specific` gives,
+    /// for full-width, small, sparse and zero scalars, and for prefixes of the
+    /// basis.
+    #[test]
+    fn test_msm_lagrange_cached() {
+        use ff::Field;
+        use group::Group;
+        use midnight_curves::{Bls12, Fq, G1Affine, G1Projective};
+
+        use crate::poly::kzg::msm::{msm_lagrange_cached, msm_specific};
+
+        const K: u32 = 8;
+        let n = 1 << K;
+        let params: ParamsKZG<Bls12> = ParamsKZG::unsafe_setup(K, OsRng);
+        let random: Vec<Fq> = (0..n).map(|_| Fq::random(OsRng)).collect();
+        let small: Vec<Fq> = (0..n as u64).map(|i| Fq::from(i % 5)).collect();
+        let sparse: Vec<Fq> =
+            (0..n).map(|i| if i % 7 == 0 { random[i] } else { Fq::ZERO }).collect();
+        let bits: Vec<Fq> = (0..n).map(|i| Fq::from((i % 2) as u64)).collect();
+        let minus_one = vec![-Fq::ONE; n];
+        let zero = vec![Fq::ZERO; n];
+
+        for coeffs in [&random, &small, &sparse, &bits, &minus_one, &zero] {
+            for len in [n, n / 2 + 3, 1, 0] {
+                let coeffs = &coeffs[..len];
+                let expected = msm_specific::<G1Affine>(coeffs, &params.g_lagrange[..len]);
+                let got = msm_lagrange_cached::<Bls12>(&params, coeffs).unwrap();
+                assert_eq!(got, expected);
+            }
+        }
+        assert_eq!(
+            msm_lagrange_cached::<Bls12>(&params, &zero).unwrap(),
+            G1Projective::identity()
+        );
+    }
 
     #[test]
     fn test_commit_lagrange() {
