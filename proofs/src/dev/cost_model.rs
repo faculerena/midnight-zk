@@ -814,6 +814,64 @@ mod tests {
         }
     }
 
+    /// `keygen_for_write_with_k` gives the verifying key of
+    /// `keygen_vk_with_k`, and a proving key that writes the bytes of the one
+    /// of `keygen_pk`, for both serde formats. The written key reads back into
+    /// a proving key that proves.
+    #[test]
+    fn keygen_for_write() {
+        use crate::{
+            plonk::{keygen_for_write_with_k, ProvingKey},
+            utils::SerdeFormat,
+        };
+
+        let k = 9;
+        let circuit = StandardPlonk::<1>(Fq::from(7u64));
+        let params = ParamsKZG::<Bls12>::unsafe_setup(k, OsRng);
+
+        let vk = keygen_vk_with_k::<_, KZGCommitmentScheme<Bls12>, _>(&params, &circuit, k)
+            .expect("vk should not fail");
+        let pk = keygen_pk(vk.clone(), &circuit).expect("pk should not fail");
+        let (write_vk, write_pk) =
+            keygen_for_write_with_k::<_, KZGCommitmentScheme<Bls12>, _>(&params, &circuit, k)
+                .expect("keygen_for_write should not fail");
+
+        for format in [SerdeFormat::Processed, SerdeFormat::RawBytes] {
+            let (mut expected, mut got) = (vec![], vec![]);
+            vk.write(&mut expected, format).unwrap();
+            write_vk.write(&mut got, format).unwrap();
+            assert_eq!(got, expected);
+
+            let (mut expected, mut got) = (vec![], vec![]);
+            pk.write(&mut expected, format).unwrap();
+            write_pk.write(&mut got, format).unwrap();
+            assert_eq!(got, expected);
+        }
+
+        let mut bytes = vec![];
+        write_pk.write(&mut bytes, SerdeFormat::RawBytes).unwrap();
+        let pk = ProvingKey::<Fq, KZGCommitmentScheme<Bls12>>::read::<_, StandardPlonk<1>>(
+            &mut bytes.as_slice(),
+            SerdeFormat::RawBytes,
+            #[cfg(feature = "circuit-params")]
+            (),
+        )
+        .unwrap();
+        let instances: &[&[Fq]] = &[&[circuit.0]];
+        let mut transcript = CircuitTranscript::<State>::init();
+        create_proof::<Fq, KZGCommitmentScheme<Bls12>, _, _>(
+            &params,
+            &pk,
+            std::slice::from_ref(&circuit),
+            #[cfg(feature = "committed-instances")]
+            0,
+            &[instances],
+            &mut transcript,
+            OsRng,
+        )
+        .expect("proof generation should not fail");
+    }
+
     #[test]
     fn cost_model() {
         let k = 9;

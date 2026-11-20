@@ -114,6 +114,21 @@ impl Assembly {
         Ok(build_vk(params, domain, p, |i, j| self.mapping[i][j])?.0)
     }
 
+    /// The verifying key of [`Self::build_vk`], and the permutation
+    /// polynomials in Lagrange form it commits to.
+    #[allow(clippy::type_complexity)]
+    pub(crate) fn build_vk_and_permutations<
+        F: WithSmallOrderMulGroup<3>,
+        CS: PolynomialCommitmentScheme<F>,
+    >(
+        self,
+        params: &CS::Parameters,
+        domain: &EvaluationDomain<F>,
+        p: &Argument,
+    ) -> Result<(VerifyingKey<F, CS>, Vec<Polynomial<F, LagrangeCoeff>>), Error> {
+        build_vk(params, domain, p, |i, j| self.mapping[i][j])
+    }
+
     pub(crate) fn build_pk<F: WithSmallOrderMulGroup<3>>(
         self,
         domain: &EvaluationDomain<F>,
