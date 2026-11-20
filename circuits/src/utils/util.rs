@@ -78,11 +78,12 @@ fn from_u64_le_digits<F: CircuitField>(digits: &[u64]) -> F {
         return F::ZERO;
     }
 
+    // 2^64: one multiplication per digit instead of 64 doublings.
+    // (`from_u128` would itself double 64 times.)
+    let shift = F::from(1u64 << 32).square();
     let mut acc = F::from(*digits.last().unwrap());
     for digit in digits.iter().rev().skip(1) {
-        for _ in 0..64 {
-            acc = acc.double();
-        }
+        acc *= shift;
         acc += F::from(*digit)
     }
     acc
@@ -209,4 +210,38 @@ pub trait FromScratch<F: CircuitField> {
     ) -> Self::Config;
 
     fn load_from_scratch(&self, layouter: &mut impl Layouter<F>) -> Result<(), Error>;
+}
+
+#[cfg(test)]
+mod tests {
+    use ff::Field;
+    use midnight_curves::Fq;
+
+    use super::*;
+
+    /// `from_u64_le_digits` agrees with shifting by doubling 64 times.
+    #[test]
+    fn test_from_u64_le_digits() {
+        fn by_doubling(digits: &[u64]) -> Fq {
+            let mut acc = Fq::ZERO;
+            for digit in digits.iter().rev() {
+                for _ in 0..64 {
+                    acc = acc.double();
+                }
+                acc += Fq::from(*digit);
+            }
+            acc
+        }
+        let cases: [&[u64]; 6] = [
+            &[],
+            &[0],
+            &[u64::MAX],
+            &[1, 2],
+            &[u64::MAX, u64::MAX, u64::MAX, u64::MAX],
+            &[3, 0, u64::MAX, 7, 1 << 63, 42],
+        ];
+        for digits in cases {
+            assert_eq!(from_u64_le_digits::<Fq>(digits), by_doubling(digits));
+        }
+    }
 }
