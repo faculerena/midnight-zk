@@ -5,7 +5,7 @@ use std::ops::Range;
 use ff::{Field, FromUniformBytes, PrimeField, WithSmallOrderMulGroup};
 
 use super::{
-    Error, LagrangeCoeff, Polynomial, ProvingKey, VerifyingKey,
+    Error, LagrangeCoeff, Polynomial, ProvingKey, VerifyingKey, WriteOnlyProvingKey,
     circuit::{
         Advice, Any, Assignment, Circuit, Column, ConstraintSystem, Fixed, FloorPlanner, Instance,
         Selector,
@@ -223,12 +223,24 @@ where
     keygen_vk_with_k(params, circuit, k)
 }
 
-/// Generate a `VerifyingKey` from an instance of `Circuit`.
-pub fn keygen_vk_with_k<F, PCS, ConcreteCircuit>(
+/// Synthesizes `circuit` over a domain of size `2^k`. Returns the domain, the
+/// constraint system with its selectors turned into fixed columns, the fixed
+/// columns (those selectors included) and the permutation polynomials, all
+/// in Lagrange form.
+#[allow(clippy::type_complexity)]
+fn synthesize_fixed<F, PCS, ConcreteCircuit>(
     params: &PCS::Parameters,
     circuit: &ConcreteCircuit,
     k: u32,
-) -> Result<VerifyingKey<F, PCS>, Error>
+) -> Result<
+    (
+        EvaluationDomain<F>,
+        ConstraintSystem<F>,
+        Vec<Polynomial<F, LagrangeCoeff>>,
+        Vec<Polynomial<F, LagrangeCoeff>>,
+    ),
+    Error,
+>
 where
     F: WithSmallOrderMulGroup<3> + FromUniformBytes<64> + Ord,
     PCS: PolynomialCommitmentScheme<F>,
@@ -275,10 +287,57 @@ where
 
     let permutations = assembly.permutation.into_permutations::<F>(&domain, &cs.permutation);
 
+    Ok((domain, cs, fixed, permutations))
+}
+
+/// Generate a `VerifyingKey` from an instance of `Circuit`.
+pub fn keygen_vk_with_k<F, PCS, ConcreteCircuit>(
+    params: &PCS::Parameters,
+    circuit: &ConcreteCircuit,
+    k: u32,
+) -> Result<VerifyingKey<F, PCS>, Error>
+where
+    F: WithSmallOrderMulGroup<3> + FromUniformBytes<64> + Ord,
+    PCS: PolynomialCommitmentScheme<F>,
+    ConcreteCircuit: Circuit<F>,
+{
+    let (domain, cs, fixed, permutations) = synthesize_fixed::<F, PCS, _>(params, circuit, k)?;
+
     let fixed_polys: Vec<_> = fixed.iter().chain(permutations.iter()).collect();
     let phase0_commitment = PCS::commit_many(params, &fixed_polys, &cs.fixed_polys_labels());
 
     Ok(VerifyingKey::from_parts(domain, phase0_commitment, cs))
+}
+
+/// Generates a `VerifyingKey` and a [`WriteOnlyProvingKey`] with a single
+/// synthesis of the circuit, for when the keys are only to be written out.
+///
+/// The verifying key is the one of [`keygen_vk_with_k`], and the proving key
+/// writes the same bytes as the one of [`keygen_pk`]. It skips the second
+/// synthesis of `keygen_pk` and all the FFTs of the proving key.
+#[allow(clippy::type_complexity)]
+pub fn keygen_for_write_with_k<F, PCS, ConcreteCircuit>(
+    params: &PCS::Parameters,
+    circuit: &ConcreteCircuit,
+    k: u32,
+) -> Result<(VerifyingKey<F, PCS>, WriteOnlyProvingKey<F, PCS>), Error>
+where
+    F: WithSmallOrderMulGroup<3> + FromUniformBytes<64> + Ord,
+    PCS: PolynomialCommitmentScheme<F>,
+    ConcreteCircuit: Circuit<F>,
+{
+    let (domain, cs, fixed, permutations) = synthesize_fixed::<F, PCS, _>(params, circuit, k)?;
+
+    let fixed_polys: Vec<_> = fixed.iter().chain(permutations.iter()).collect();
+    let phase0_commitment = PCS::commit_many(params, &fixed_polys, &cs.fixed_polys_labels());
+
+    let vk = VerifyingKey::from_parts(domain, phase0_commitment, cs);
+    let pk = WriteOnlyProvingKey {
+        vk: vk.clone(),
+        fixed_values: fixed,
+        sigmas: permutations,
+    };
+    Ok((vk, pk))
 }
 
 /// Generate a `ProvingKey` from a `VerifyingKey` and an instance of `Circuit`.

@@ -900,6 +900,87 @@ mod tests {
         assert_eq!(model.size, transcript.finalize().len());
     }
 
+    /// `keygen_for_write_with_k` gives the verifying key of
+    /// `keygen_vk_with_k`, and a proving key that writes the bytes of the one
+    /// of `keygen_pk`, for both serde formats. `srs_k` is the size of the SRS
+    /// that `PCS` needs for a circuit of size `2^9`.
+    fn check_keygen_for_write<PCS>(srs_k: u32)
+    where
+        PCS: PolynomialCommitmentScheme<Fq, Parameters = ParamsKZG<Bls12>>,
+    {
+        use crate::{plonk::keygen_for_write_with_k, utils::SerdeFormat};
+
+        let k = 9;
+        let circuit = StandardPlonk::<1>(Fq::from(7u64));
+        let params = ParamsKZG::<Bls12>::unsafe_setup(srs_k, OsRng);
+
+        let vk = keygen_vk_with_k::<_, PCS, _>(&params, &circuit, k).expect("vk should not fail");
+        let pk = keygen_pk(vk.clone(), &circuit).expect("pk should not fail");
+        let (write_vk, write_pk) = keygen_for_write_with_k::<_, PCS, _>(&params, &circuit, k)
+            .expect("keygen_for_write should not fail");
+
+        for format in [SerdeFormat::Processed, SerdeFormat::RawBytes] {
+            let (mut expected, mut got) = (vec![], vec![]);
+            vk.write(&mut expected, format).unwrap();
+            write_vk.write(&mut got, format).unwrap();
+            assert_eq!(got, expected);
+
+            let (mut expected, mut got) = (vec![], vec![]);
+            pk.write(&mut expected, format).unwrap();
+            write_pk.write(&mut got, format).unwrap();
+            assert_eq!(got, expected);
+        }
+    }
+
+    #[test]
+    fn keygen_for_write() {
+        use crate::poly::fflonk::Fflonk;
+
+        check_keygen_for_write::<KZGCommitmentScheme<Bls12>>(9);
+        check_keygen_for_write::<Fflonk<KZGCommitmentScheme<Bls12>, 2>>(9 + 2);
+    }
+
+    /// The proving key that `keygen_for_write_with_k` writes reads back into
+    /// a proving key that proves.
+    #[test]
+    fn keygen_for_write_reads_back() {
+        use crate::{
+            plonk::{ProvingKey, keygen_for_write_with_k},
+            utils::SerdeFormat,
+        };
+
+        let k = 9;
+        let circuit = StandardPlonk::<1>(Fq::from(7u64));
+        let params = ParamsKZG::<Bls12>::unsafe_setup(k, OsRng);
+        let (_, write_pk) =
+            keygen_for_write_with_k::<_, KZGCommitmentScheme<Bls12>, _>(&params, &circuit, k)
+                .expect("keygen_for_write should not fail");
+
+        let mut bytes = vec![];
+        write_pk.write(&mut bytes, SerdeFormat::RawBytes).unwrap();
+        let pk = ProvingKey::<Fq, KZGCommitmentScheme<Bls12>>::read::<_, StandardPlonk<1>>(
+            &mut bytes.as_slice(),
+            SerdeFormat::RawBytes,
+            #[cfg(feature = "circuit-params")]
+            (),
+        )
+        .unwrap();
+
+        let instances: &[&[Fq]] = &[&[circuit.0]];
+        let mut transcript = CircuitTranscript::<State>::init();
+        create_proof::<Fq, KZGCommitmentScheme<Bls12>, _, _>(
+            &params,
+            &pk,
+            &circuit,
+            #[cfg(feature = "committed-instances")]
+            0,
+            instances,
+            &mut transcript,
+            OsRng,
+        )
+        .expect("proof generation should not fail");
+    }
+
     #[test]
     fn cost_model() {
         let k = 9;

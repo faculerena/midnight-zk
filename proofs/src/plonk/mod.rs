@@ -339,6 +339,55 @@ pub struct PinnedVerificationKey<'a, F: PrimeField, PCS: PolynomialCommitmentSch
     cs: PinnedConstraintSystem<'a, F>,
     phase0_commitment: &'a PCS::Commitment,
 }
+/// Writes the parts of a proving key that [`ProvingKey::write`] writes: the
+/// verifying key, the fixed columns and the permutation polynomials, in
+/// Lagrange form. [`ProvingKey::read`] derives the coefficient forms and the
+/// cosets from them.
+fn write_proving_key<F, PCS, W>(
+    vk: &VerifyingKey<F, PCS>,
+    fixed_values: &[Polynomial<F, LagrangeCoeff>],
+    sigmas: &[Polynomial<F, LagrangeCoeff>],
+    writer: &mut W,
+    format: SerdeFormat,
+) -> io::Result<()>
+where
+    F: WithSmallOrderMulGroup<3> + PrimeField + FromUniformBytes<64> + SerdeObject,
+    PCS: PolynomialCommitmentScheme<F>,
+    W: io::Write,
+{
+    vk.write(writer, format)?;
+    write_polynomial_slice(fixed_values, writer)?;
+    write_polynomial_slice(sigmas, writer)?;
+    Ok(())
+}
+
+/// The part of a [`ProvingKey`] that [`ProvingKey::write`] writes, and
+/// nothing else: it can be written out, and that is all it can do.
+///
+/// It holds the verifying key, the fixed columns and the permutation
+/// polynomials in Lagrange form. What a prover derives from those (the
+/// coefficient and extended forms, `l0`, `l_last`, `l_active_row` and the
+/// evaluator) is not computed. To prove, read the written key back with
+/// [`ProvingKey::read`], which gives a complete proving key.
+#[derive(Debug)]
+pub struct WriteOnlyProvingKey<F: PrimeField, PCS: PolynomialCommitmentScheme<F>> {
+    pub(crate) vk: VerifyingKey<F, PCS>,
+    pub(crate) fixed_values: Vec<Polynomial<F, LagrangeCoeff>>,
+    pub(crate) sigmas: Vec<Polynomial<F, LagrangeCoeff>>,
+}
+
+impl<F, PCS> WriteOnlyProvingKey<F, PCS>
+where
+    F: WithSmallOrderMulGroup<3> + PrimeField + FromUniformBytes<64> + SerdeObject,
+    PCS: PolynomialCommitmentScheme<F>,
+{
+    /// Writes the proving key to a buffer: the same bytes as
+    /// [`ProvingKey::write`] writes for the proving key of [`keygen_pk`].
+    pub fn write<W: io::Write>(&self, writer: &mut W, format: SerdeFormat) -> io::Result<()> {
+        write_proving_key(&self.vk, &self.fixed_values, &self.sigmas, writer, format)
+    }
+}
+
 /// This is a proving key which allows for the creation of proofs for a
 /// particular circuit.
 #[derive(Debug)]
@@ -459,12 +508,13 @@ where
     ///   reduction. Does so by first writing the verifying key and then
     ///   serializing the rest of the data (in the form of field polynomials)
     pub fn write<W: io::Write>(&self, writer: &mut W, format: SerdeFormat) -> io::Result<()> {
-        self.vk.write(writer, format)?;
-        write_polynomial_slice(&self.fixed_values, writer)?;
-        // Only the Lagrange form is written: [`Self::read`] derives the
-        // coefficient form and the cosets from it.
-        write_polynomial_slice(&self.sigmas.values, writer)?;
-        Ok(())
+        write_proving_key(
+            &self.vk,
+            &self.fixed_values,
+            &self.sigmas.values,
+            writer,
+            format,
+        )
     }
 
     /// Reads a proving key from a buffer.
