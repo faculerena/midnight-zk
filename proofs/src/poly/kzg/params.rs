@@ -25,6 +25,10 @@ pub struct ParamsKZG<E: Engine> {
     /// first Lagrange commitment and reused by the following ones. See
     /// [`super::msm::msm_lagrange_cached`].
     pub(crate) g_lagrange_affine: std::sync::OnceLock<std::sync::Arc<[blst::blst_p1_affine]>>,
+    /// `g[1]`, that is `[tau]_1`, once it has been checked against the
+    /// Lagrange basis and the G2 elements; `None` if the check failed. See
+    /// [`ParamsKZG::checked_tau_g1`].
+    pub(crate) tau_g1: std::sync::OnceLock<Option<E::G1>>,
 }
 
 impl<E: Engine> Params for ParamsKZG<E> {
@@ -51,6 +55,7 @@ impl<E: Engine + Debug> ParamsKZG<E> {
         self.g.truncate(n);
         self.g_lagrange = g_to_lagrange(&self.g, new_k);
         self.g_lagrange_affine = Default::default();
+        self.tau_g1 = Default::default();
     }
 
     /// Initializes parameters for the curve, draws toxic secret from given rng.
@@ -100,6 +105,7 @@ impl<E: Engine + Debug> ParamsKZG<E> {
             g2,
             s_g2,
             g_lagrange_affine: Default::default(),
+            tau_g1: Default::default(),
         }
     }
 
@@ -121,6 +127,7 @@ impl<E: Engine + Debug> ParamsKZG<E> {
             g2,
             s_g2,
             g_lagrange_affine: Default::default(),
+            tau_g1: Default::default(),
         }
     }
 
@@ -231,6 +238,7 @@ impl<E: Engine + Debug> ParamsKZG<E> {
             g2,
             s_g2,
             g_lagrange_affine: Default::default(),
+            tau_g1: Default::default(),
         })
     }
 }
@@ -276,6 +284,46 @@ where
 }
 
 impl<E: MultiMillerLoop + Debug> ParamsKZG<E> {
+    /// `[tau]_1`, the commitment to the polynomial `X`, taken from the
+    /// monomial basis (`g[1]`) after checking that it is the element the
+    /// Lagrange basis and the G2 elements stand for; `None` if it is not.
+    ///
+    /// Commitments to polynomials in Lagrange form otherwise read the
+    /// Lagrange basis only, so without this check a corrupt monomial region
+    /// of a params file would silently change whatever is built from this
+    /// element. The check is done once per parameter set:
+    ///
+    /// 1. `g[0] == sum_j g_lagrange[j]`: the Lagrange polynomials add up to the
+    ///    constant 1, so this ties `g[0]` to the Lagrange basis;
+    /// 2. `e(g[1], g2) == e(g[0], s_g2)`: `g[1]` is `tau * g[0]` for the same
+    ///    `tau` as the verifier's G2 element, the equation every KZG opening
+    ///    proof made with the Lagrange basis has to satisfy.
+    ///
+    /// For a well-formed SRS (Lagrange basis and G2 elements of the same
+    /// `tau`, which proving and verifying need anyway) these two hold exactly
+    /// when `g[1] == sum_j omega^j * g_lagrange[j]`, the Lagrange commitment
+    /// to `X`, and they cost n point additions and two pairings instead of a
+    /// full-width multi-scalar multiplication.
+    pub(crate) fn checked_tau_g1(&self) -> Option<E::G1>
+    where
+        E::G1: Send + Sync,
+    {
+        use rayon::iter::{IntoParallelRefIterator, ParallelIterator};
+        *self.tau_g1.get_or_init(|| {
+            if self.g.len() < 2 {
+                return None;
+            }
+            let (g0, g1) = (self.g[0], self.g[1]);
+            let sum = self.g_lagrange.par_iter().copied().reduce(E::G1::identity, |a, b| a + b);
+            if sum != g0 || bool::from(g0.is_identity()) {
+                return None;
+            }
+            let lhs = E::pairing(&g1.into(), &self.g2.into());
+            let rhs = E::pairing(&g0.into(), &self.s_g2.into());
+            (lhs == rhs).then_some(g1)
+        })
+    }
+
     /// Consume the prover parameters into verifier parameters. Need to specify
     /// the size of public inputs.
     pub fn verifier_params(&self) -> ParamsVerifierKZG<E> {
@@ -360,6 +408,68 @@ mod test {
         let commitment = KZGCommitmentScheme::commit(&params, &b);
 
         assert_eq!(commitment, tmp);
+    }
+
+    /// The commitment to `X` taken from the monomial basis is the Lagrange
+    /// commitment to `X`, and a monomial basis, Lagrange basis or G2 element
+    /// that does not agree with the rest is refused rather than used.
+    #[test]
+    fn test_commit_x_checks_the_monomial_basis() {
+        use ff::Field;
+        use group::Group;
+        use midnight_curves::{Bls12, Fq, G1Projective, G2Projective};
+
+        use crate::{plonk::Error, poly::EvaluationDomain};
+
+        for k in [1u32, 2, 6, 9] {
+            let params: ParamsKZG<Bls12> = ParamsKZG::unsafe_setup(k, OsRng);
+            let domain = EvaluationDomain::<Fq>::new(1, k);
+            let mut x = domain.empty_lagrange();
+            let mut cur = Fq::ONE;
+            for v in x.iter_mut() {
+                *v = cur;
+                cur *= domain.get_omega();
+            }
+            let expected = KZGCommitmentScheme::commit_lagrange(&params, &x);
+            assert_eq!(
+                KZGCommitmentScheme::commit_x(&params, &x).unwrap(),
+                expected
+            );
+            assert_eq!(params.checked_tau_g1(), Some(expected));
+
+            let corrupt = |f: &dyn Fn(&mut ParamsKZG<Bls12>)| {
+                let mut p = params.clone();
+                p.tau_g1 = Default::default();
+                f(&mut p);
+                assert!(p.checked_tau_g1().is_none());
+                assert!(matches!(
+                    KZGCommitmentScheme::commit_x(&p, &x),
+                    Err(Error::InconsistentSrs)
+                ));
+            };
+            corrupt(&|p| p.g[1] += G1Projective::generator());
+            corrupt(&|p| p.g[1] = G1Projective::identity());
+            corrupt(&|p| p.g[0] = p.g[0].double());
+            corrupt(&|p| {
+                p.g[0] = p.g[0].double();
+                p.g[1] = p.g[1].double();
+            });
+            corrupt(&|p| p.g.swap(0, 1));
+            corrupt(&|p| p.g_lagrange[0] += G1Projective::generator());
+            corrupt(&|p| p.s_g2 += G2Projective::generator());
+            corrupt(&|p| p.g2 = p.g2.double());
+        }
+
+        // Parameters larger than the domain: the Lagrange route, as before.
+        let params: ParamsKZG<Bls12> = ParamsKZG::unsafe_setup(6, OsRng);
+        let domain = EvaluationDomain::<Fq>::new(1, 5);
+        let x = domain.lagrange_from_vec(
+            (0..32).map(|j| domain.get_omega().pow_vartime([j as u64])).collect(),
+        );
+        assert_eq!(
+            KZGCommitmentScheme::commit_x(&params, &x).unwrap(),
+            KZGCommitmentScheme::commit_lagrange(&params, &x)
+        );
     }
 
     #[test]
