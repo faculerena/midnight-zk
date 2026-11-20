@@ -390,7 +390,7 @@ pub(crate) fn cost_model_options<F: Ord + Field + FromUniformBytes<64>, C: Circu
                 // columns (see that [`plonk::circuit::TableColumn` is a wrapper
                 // around `Column<Fixed>`]). All of a table region's rows are
                 // counted towards `table_rows_count.`
-                if region.columns.iter().all(|c| *c.column_type() == Fixed) {
+                if region.all_fixed {
                     table_rows_count = std::cmp::max(table_rows_count, end + 1);
                 } else if prover.has_measured_regions {
                     if region.is_measured {
@@ -453,8 +453,8 @@ pub(crate) fn cost_model_options<F: Ord + Field + FromUniformBytes<64>, C: Circu
 struct DevAssembly<F: Field> {
     cs: ConstraintSystem<F>,
     instance_rows: RefCell<usize>,
-    /// The regions in the circuit.
-    regions: Vec<Region>,
+    /// The regions in the circuit: of each, what the cost model reads.
+    regions: Vec<RegionExtent>,
     current_region: Option<Region>,
     /// Set to `true` while the synthesizer is between a
     /// [`COST_MEASURE_START`] and a [`COST_MEASURE_END`] namespace marker.
@@ -462,6 +462,18 @@ struct DevAssembly<F: Field> {
     /// Set to `true` once a [`COST_MEASURE_START`] marker has been seen.
     /// Used to switch [`cost_model_options`] into "measured-only" mode.
     has_measured_regions: bool,
+}
+
+/// What [`cost_model_options`] reads of a region once it is complete. Kept
+/// instead of the [`Region`] itself, which costs a few allocations per region
+/// that add up on a large circuit.
+struct RegionExtent {
+    /// [`Region::rows`].
+    rows: Option<(usize, usize)>,
+    /// Whether all of [`Region::columns`] are `Fixed` columns.
+    all_fixed: bool,
+    /// [`Region::is_measured`].
+    is_measured: bool,
 }
 
 impl<F: FromUniformBytes<64> + Ord> DevAssembly<F> {
@@ -496,14 +508,15 @@ impl<F: FromUniformBytes<64> + Ord> DevAssembly<F> {
 }
 
 impl<F: Field> Assignment<F> for DevAssembly<F> {
-    fn enter_region<NR, N>(&mut self, name: N)
+    fn enter_region<NR, N>(&mut self, _name: N)
     where
         NR: Into<String>,
         N: FnOnce() -> NR,
     {
         assert!(self.current_region.is_none());
+        // The cost model never reads the name, so it is not built.
         self.current_region = Some(Region {
-            name: name().into(),
+            name: String::new(),
             columns: Default::default(),
             rows: None,
             annotations: HashMap::default(),
@@ -522,23 +535,23 @@ impl<F: Field> Assignment<F> for DevAssembly<F> {
     }
 
     fn exit_region(&mut self) {
-        self.regions.push(self.current_region.take().unwrap());
+        let region = self.current_region.take().unwrap();
+        self.regions.push(RegionExtent {
+            rows: region.rows,
+            all_fixed: region.columns.iter().all(|c| *c.column_type() == Fixed),
+            is_measured: region.is_measured,
+        });
     }
 
-    fn enable_selector<A, AR>(&mut self, _: A, selector: &Selector, row: usize) -> Result<(), Error>
+    fn enable_selector<A, AR>(&mut self, _: A, _: &Selector, _: usize) -> Result<(), Error>
     where
         A: FnOnce() -> AR,
         AR: Into<String>,
     {
-        // Track that this selector was enabled. We require that all selectors are
-        // enabled inside some region (i.e. no floating selectors).
-        self.current_region
-            .as_mut()
-            .unwrap()
-            .enabled_selectors
-            .entry(*selector)
-            .or_default()
-            .push(row);
+        // We require that all selectors are enabled inside some region (i.e. no
+        // floating selectors). Which selectors are enabled on which rows is not
+        // recorded: the cost model only reads the extent of each region.
+        assert!(self.current_region.is_some());
 
         Ok(())
     }
@@ -561,12 +574,10 @@ impl<F: Field> Assignment<F> for DevAssembly<F> {
         AR: Into<String>,
     {
         if let Some(region) = self.current_region.as_mut() {
+            // Only the extent is recorded: the cost model never reads
+            // `Region::cells`, and one map entry per assigned cell made
+            // each run cost hundreds of megabytes on a large circuit.
             region.update_extent(column.into(), row);
-            region
-                .cells
-                .entry((column.into(), row))
-                .and_modify(|count| *count += 1)
-                .or_default();
         }
 
         Ok(())
@@ -586,12 +597,8 @@ impl<F: Field> Assignment<F> for DevAssembly<F> {
         AR: Into<String>,
     {
         if let Some(region) = self.current_region.as_mut() {
+            // As in `assign_advice`: only the extent is recorded.
             region.update_extent(column.into(), row);
-            region
-                .cells
-                .entry((column.into(), row))
-                .and_modify(|count| *count += 1)
-                .or_default();
         }
 
         Ok(())
